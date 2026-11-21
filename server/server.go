@@ -761,6 +761,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/init", s.authInit)
 	mux.HandleFunc("POST /api/auth/login", s.authLogin)
 	mux.HandleFunc("POST /api/auth/change-password", s.authChangePassword)
+	mux.HandleFunc("POST /api/auth/viewer-token", s.authViewerToken)
 
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/ready", s.ready)
@@ -1264,7 +1265,7 @@ func (s *Server) setActive(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID string `json:"id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -1290,7 +1291,7 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action string `json:"action"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -1331,7 +1332,7 @@ func (s *Server) controlIntent(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"` // required for cancel (delete): deletion reason
 		Mode   string `json:"mode"`   // cancel only: soft (default, soft delete) | hard (real delete, cascades away exclusively-owned descendants)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}
@@ -1488,7 +1489,7 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 		ThinkingType    string  `json:"thinking_type"`
 		ReasoningEffort string  `json:"reasoning_effort"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -1510,11 +1511,21 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 	// Keyless formats (Ollama) need no key; the others keep/require one.
 	if cfg.APIKey == "" && cfg.NeedsAPIKey() {
 		s.cfgMu.Lock()
-		cfg.APIKey = s.llmCfg.APIKey // keep existing key if not re-entered
+		// The saved key is kept only while provider and base URL stay the same; otherwise it must be typed again.
+		if llmKeyMayReuse(cfg, s.llmCfg) {
+			cfg.APIKey = s.llmCfg.APIKey
+		}
 		s.cfgMu.Unlock()
 	}
 	if cfg.APIKey == "" && cfg.NeedsAPIKey() {
-		writeErr(w, 400, "api_key required")
+		s.cfgMu.Lock()
+		savedKey := s.llmCfg.APIKey != ""
+		s.cfgMu.Unlock()
+		if savedKey {
+			writeErr(w, 400, "Cambiaste el proveedor o la URL base: escribe la clave otra vez.")
+		} else {
+			writeErr(w, 400, "api_key required")
+		}
 		return
 	}
 	// Validate provider construction before persisting it as the active profile.
@@ -1566,6 +1577,12 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	var stored *db.LLMProfile
 	if req.ProfileID != nil {
 		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
+			stored = p
+		}
+	}
+	// When no profile_id is specified, test the active/default profile (local behavior).
+	if stored == nil {
+		if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
 			stored = p
 		}
 	}
@@ -1741,7 +1758,7 @@ type taskCredentialReq struct {
 
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	var req createTaskReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}
@@ -1862,7 +1879,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 		ActiveLLMProfileID *int64  `json:"active_llm_profile_id"`
 		LLMRotate          *bool   `json:"llm_rotate"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}
@@ -2173,7 +2190,7 @@ func (s *Server) taskScopeAdd(w http.ResponseWriter, r *http.Request) {
 		Value  string `json:"value"`
 		Reason string `json:"reason"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&body); err != nil {
 		writeErr(w, 400, "invalid JSON")
 		return
 	}
@@ -2221,7 +2238,7 @@ func (s *Server) frontier(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, []any{})
 		return
 	}
-	fr, _ := t.Store.Frontier(atoiDefault(r.URL.Query().Get("limit"), 100))
+	fr, _ := t.Store.Frontier(min(atoiDefault(r.URL.Query().Get("limit"), 100), 1000))
 	writeJSON(w, 200, taskNodeDTOs(fr))
 }
 
@@ -2583,7 +2600,7 @@ func (s *Server) patchFinding(w http.ResponseWriter, r *http.Request) {
 		Name        *string `json:"name"`
 		VulnClass   *string `json:"vulnclass"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&body); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}
@@ -3076,7 +3093,7 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	since := int64(atoiDefault(r.URL.Query().Get("since"), 0))
-	limit := atoiDefault(r.URL.Query().Get("limit"), 300)
+	limit := min(atoiDefault(r.URL.Query().Get("limit"), 300), 1000)
 	var intentPtr *int64
 	if iv := r.URL.Query().Get("intent"); iv != "" {
 		if n, err := strconv.ParseInt(iv, 10, 64); err == nil {
@@ -3626,7 +3643,7 @@ func (s *Server) deleteTrafficHosts(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Hosts []string `json:"hosts"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, "invalid body")
 		return
 	}
@@ -3958,7 +3975,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		// Target noise profile: off|quiet|balanced|aggressive; null = unchanged. Applies to the next request, no agent rebuild.
 		NoiseProfile *string `json:"noise_profile"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -4173,7 +4190,7 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 		KeenableKey string `json:"keenable_search_api_key"`
 	}
 	// Empty body is fine — fall back entirely to the saved config below.
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil && err != io.EOF {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -4286,7 +4303,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		Attachments []chatAttachment `json:"attachments,omitempty"` // files uploaded via method 1 (paths relative to the task work dir)
 		Seg         *int             `json:"seg,omitempty"`         // target main-session segment; omitted = newest segment
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}

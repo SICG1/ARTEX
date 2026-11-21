@@ -18,7 +18,7 @@ const MaskedPrefix = "__masked__"
 
 // MaskedValue generates a masked value:
 //
-//	"__masked__"              original value too short, no hint given
+//	"__masked__"              original value under 20 characters, no hint given
 //	"__masked__:…ab12cd"      carries the last 6 characters of the original as a hint
 //
 // Exposing only the last 6 characters is a deliberate choice: the recognizable
@@ -27,7 +27,8 @@ const MaskedPrefix = "__masked__"
 // The last 6 characters are not enough to reconstruct the credential, but enough
 // for the person who configured it to recognize "that's my group".
 func MaskedValue(secret string) string {
-	if len(secret) <= 6 {
+	// Under 20 characters the last six would reveal most of the secret: give no hint.
+	if len(secret) < 20 {
 		return MaskedPrefix
 	}
 	return MaskedPrefix + ":…" + secret[len(secret)-6:]

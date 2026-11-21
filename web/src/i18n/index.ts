@@ -10,10 +10,12 @@
 //
 // To translate the UI into another language, add locales/<code>.json and register it below.
 
+import en from "./locales/en.json";
+import es from "./locales/es.json";
 import tr from "./locales/tr.json";
 import zhCN from "./locales/zh-CN.json";
 
-export type Locale = "tr" | "en" | "zh-CN";
+export type Locale = "tr" | "en" | "es" | "zh-CN";
 
 // Used when nothing is saved and the browser language is not one of LOCALES,
 // and for the static prerender, which has no browser.
@@ -22,6 +24,7 @@ export const DEFAULT_LOCALE: Locale = "en";
 export const LOCALES: { code: Locale; label: string }[] = [
   { code: "tr", label: "Türkçe" },
   { code: "en", label: "English" },
+  { code: "es", label: "Español" },
   { code: "zh-CN", label: "简体中文" },
 ];
 
@@ -29,13 +32,15 @@ const STORAGE_KEY = "artex.locale";
 
 const DICTIONARIES: Record<Locale, Record<string, string>> = {
   tr: tr as Record<string, string>,
-  en: {},
+  en: en as Record<string, string>,
+  es: es as Record<string, string>,
   "zh-CN": zhCN as Record<string, string>,
 };
 
 const INTL_LOCALES: Record<Locale, string> = {
   tr: "tr-TR",
   en: "en-US",
+  es: "es-ES",
   "zh-CN": "zh-CN",
 };
 

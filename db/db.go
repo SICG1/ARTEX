@@ -314,11 +314,17 @@ ON CONFLICT (agent_id, var_name) DO UPDATE
 	// Default-on interactive_shell for the runtime agents (planner/worker/mainagent/auto)
 	// ONCE — respects a later user toggle-off (guarded by a settings flag). goals(one-shot
 	// decomposer) stays off. Runs after the column exists (schema applied before seed).
-	if v, _, _ := d.GetSetting("interactive_shell_default_v1"); v != "true" {
+	v, _, err := d.GetSetting("interactive_shell_default_v1")
+	if err != nil {
+		return fmt.Errorf("read interactive_shell default flag: %w", err)
+	}
+	if v != "true" {
 		if _, err := d.Exec(`UPDATE agents SET interactive_shell=true WHERE key IN ('planner','worker','mainagent','auto')`); err != nil {
 			return fmt.Errorf("seed interactive_shell defaults: %w", err)
 		}
-		_ = d.SetSetting("interactive_shell_default_v1", "true")
+		if err := d.SetSetting("interactive_shell_default_v1", "true"); err != nil {
+			return fmt.Errorf("save interactive_shell default flag: %w", err)
+		}
 	}
 	// Seed the built-in browser (Playwright) MCP once — DISABLED by default (the
 	// user enables it when needed), no proxy by default. The traffic-capture

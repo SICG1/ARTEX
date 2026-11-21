@@ -206,32 +206,40 @@ func (e *Engine) doDNS(id int64, host string) {
 	ips := uniq(append(append([]string{}, data.A...), data.AAAA...))
 	// Upsert resolved IPs into the asset store.
 	for _, ip := range ips {
-		_, _ = e.as.UpsertIP(db.UpsertIPReq{
+		if _, err := e.as.UpsertIP(db.UpsertIPReq{
 			IP:           ip,
 			BoundDomains: []string{host},
-		})
+		}); err != nil {
+			log.Printf("[enrich] upsert ip %s: %v", ip, err)
+		}
 	}
 	// Record A records as subdomains if host looks like a subdomain.
 	for _, a := range data.A {
-		_, _ = e.as.UpsertSubdomain(db.UpsertSubdomainReq{
+		if _, err := e.as.UpsertSubdomain(db.UpsertSubdomainReq{
 			Domain:      host,
 			RecordType:  "A",
 			RecordValue: []string{a},
-		})
+		}); err != nil {
+			log.Printf("[enrich] upsert A record of %s: %v", host, err)
+		}
 	}
 	for _, aaaa := range data.AAAA {
-		_, _ = e.as.UpsertSubdomain(db.UpsertSubdomainReq{
+		if _, err := e.as.UpsertSubdomain(db.UpsertSubdomainReq{
 			Domain:      host,
 			RecordType:  "AAAA",
 			RecordValue: []string{aaaa},
-		})
+		}); err != nil {
+			log.Printf("[enrich] upsert AAAA record of %s: %v", host, err)
+		}
 	}
 	for _, cname := range data.CNAME {
-		_, _ = e.as.UpsertSubdomain(db.UpsertSubdomainReq{
+		if _, err := e.as.UpsertSubdomain(db.UpsertSubdomainReq{
 			Domain:      host,
 			RecordType:  "CNAME",
 			RecordValue: []string{cname},
-		})
+		}); err != nil {
+			log.Printf("[enrich] upsert CNAME record of %s: %v", host, err)
+		}
 	}
 }
 
@@ -257,12 +265,14 @@ func (e *Engine) doHTTP(ctx context.Context, id int64, rawURL string) {
 	statusCode := resp.StatusCode
 	bodyLen := int64(len(body))
 	title := extractTitle(body)
-	_, _ = e.as.UpsertHTTPService(db.UpsertHTTPServiceReq{
+	if _, err := e.as.UpsertHTTPService(db.UpsertHTTPServiceReq{
 		URL:           rawURL,
 		StatusCode:    &statusCode,
 		ContentLength: &bodyLen,
 		PageTitle:     title,
-	})
+	}); err != nil {
+		log.Printf("[enrich] upsert http service %s: %v", rawURL, err)
+	}
 }
 
 func extractTitle(body []byte) string {

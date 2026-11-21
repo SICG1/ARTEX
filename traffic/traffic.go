@@ -296,7 +296,7 @@ type Traffic struct {
 // Open initializes the traffic tree, blob store and SQLite index under dir.
 func Open(dir, addr string) (*Traffic, error) {
 	for _, d := range []string{dir, filepath.Join(dir, "_index"), filepath.Join(dir, "_blobs"), filepath.Join(dir, "_ca")} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
 	}
@@ -873,13 +873,13 @@ func (t *Traffic) spillAt(body []byte, contentType string, maxInline int) stored
 	// One bucket level (256 buckets) is enough to keep any single directory small;
 	// the store only ever holds bodies above maxInlineBody, deduplicated by hash.
 	blobDir := filepath.Join(t.dir, "_blobs", "sha256", h[:2])
-	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+	if err := os.MkdirAll(blobDir, 0o700); err != nil {
 		log.Printf("[traffic] failed to create blob directory: %v", err)
 		return storedBody{inline: clipBytes(body, blobPreview), index: indexText()}
 	}
 	blobPath := filepath.Join(blobDir, h+".bin")
 	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
-		if err := os.WriteFile(blobPath, body, 0o644); err != nil {
+		if err := writeFileAtomic(blobPath, body, 0o600); err != nil {
 			log.Printf("[traffic] failed to write blob %s: %v", h, err)
 			return storedBody{inline: clipBytes(body, blobPreview), index: indexText()}
 		}
@@ -1129,8 +1129,11 @@ const rewrittenExistsSQL = `EXISTS(SELECT 1 FROM exchange_rewrites r WHERE r.exc
 
 // Search returns paged exchange metadata (never bodies).
 func (t *Traffic) Search(host string, page, size int) ([]ExchangeMeta, error) {
-	if size <= 0 || size > 500 {
+	if size <= 0 {
 		size = 100
+	}
+	if size > 500 { // bounded: the list endpoint must not materialize an unbounded page
+		size = 500
 	}
 	q := `SELECT id,ts,host,method,url_template,url,status,content_type,resp_len,path,` + rewrittenExistsSQL + ` FROM exchanges`
 	args := []any{}
@@ -1248,7 +1251,7 @@ func (t *Traffic) pageWhere(f PageQuery) (where string, args []any) {
 		args = append(args, vs...)
 	}
 	if h := strings.TrimSpace(f.Host); h != "" {
-		add("host LIKE ?", "%"+h+"%")
+		add(`host LIKE ? ESCAPE '\'`, likeContains(h))
 	}
 	if m := strings.TrimSpace(f.Method); m != "" {
 		add("method=?", strings.ToUpper(m))
@@ -1363,8 +1366,14 @@ FROM exchange_bodies b JOIN exchanges e ON e.id=b.id WHERE b.id=?`, id).
 	if strings.TrimSpace(rel) == "" {
 		return "", "", fmt.Errorf("exchange %s has no body record", id)
 	}
-	rb, _ := os.ReadFile(filepath.Join(t.dir, rel, "request.http"))
-	pb, _ := os.ReadFile(filepath.Join(t.dir, rel, "response.http"))
+	rb, err := os.ReadFile(filepath.Join(t.dir, rel, "request.http"))
+	if err != nil {
+		return "", "", fmt.Errorf("exchange %s: cuerpo no disponible: %w", id, err)
+	}
+	pb, err := os.ReadFile(filepath.Join(t.dir, rel, "response.http"))
+	if err != nil {
+		return "", "", fmt.Errorf("exchange %s: cuerpo no disponible: %w", id, err)
+	}
 	return string(rb), string(pb), nil
 }
 
@@ -1422,12 +1431,12 @@ func (t *Traffic) Count() (int, error) {
 // blobs are shared across hosts and so are garbage-collected afterwards rather
 // than deleted by host. Returns rows deleted.
 func (t *Traffic) DeleteHost(host string) (int64, error) {
-	like := "%" + host + "%"
+	like := likeContains(host)
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
 	// Resolved before the rows go away: with a substring match, the index is the
 	// only record of which host directories the filter actually hit.
-	legacy, err := t.hostTrees(`host LIKE ?`, like)
+	legacy, err := t.hostTrees(`host LIKE ? ESCAPE '\'`, like)
 	if err != nil {
 		return 0, err
 	}
@@ -1436,7 +1445,7 @@ func (t *Traffic) DeleteHost(host string) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once committed
-	n, err := t.deleteWhere(tx, `host LIKE ?`, like)
+	n, err := t.deleteWhere(tx, `host LIKE ? ESCAPE '\'`, like)
 	if err != nil {
 		return 0, err
 	}
@@ -2252,6 +2261,66 @@ func (t *Traffic) gcBlobs() error {
 	return nil
 }
 
+// headerValue returns the value of the named header, whatever the case used for its key.
+func headerValue(h map[string]string, name string) string {
+	for k, v := range h {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
+}
+
+// logURL keeps scheme, host and path for error logs. The query and fragment often carry tokens.
+func logURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "<url no valida>"
+	}
+	return u.Scheme + "://" + u.Host + u.EscapedPath()
+}
+
+// likeContains builds a LIKE pattern that matches s as a plain substring: %, _ and \ in s match themselves.
+func likeContains(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + r.Replace(s) + "%"
+}
+
+// legacyWalkError decides what a read error in the legacy tree means for the blob GC. A
+// vanished entry holds no references and is skipped. Any other error could hide live
+// references, so it aborts the GC, which then deletes nothing.
+func legacyWalkError(p string, err error) error {
+	if os.IsNotExist(err) {
+		log.Printf("[traffic] legacy entry vanished, skipped in blob GC: %s", p)
+		return nil
+	}
+	return err
+}
+
+// writeFileAtomic writes a temporary file beside path, syncs it and renames it into place.
+// A crash or a full disk then never leaves a partial file under the final name.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // harmless after a successful rename
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
 // legacyBlobRefs adds hashes referenced by pre-SQLite exchanges, whose bodies are
 // still .http files on disk holding "@blob sha256:<hex>" pointers. Without this
 // the first collection after the upgrade would delete blobs that history still
@@ -2267,8 +2336,8 @@ func (t *Traffic) legacyBlobRefs(refs map[string]struct{}) error {
 	}
 	blobRe := regexp.MustCompile(`@blob sha256:([0-9a-f]{64})`)
 	return filepath.WalkDir(t.dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d == nil {
-			return nil // skip unreadable entries
+		if err != nil {
+			return legacyWalkError(p, err)
 		}
 		if d.IsDir() {
 			// _blobs/_index/_ca never contain references; skip their subtrees.
@@ -2282,7 +2351,7 @@ func (t *Traffic) legacyBlobRefs(refs map[string]struct{}) error {
 		}
 		b, err := os.ReadFile(p)
 		if err != nil {
-			return nil
+			return legacyWalkError(p, err)
 		}
 		for _, m := range blobRe.FindAllSubmatch(b, -1) {
 			refs[string(m[1])] = struct{}{}

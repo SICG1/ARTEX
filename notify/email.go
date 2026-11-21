@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"mime"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"strconv"
 	"strings"
@@ -56,6 +57,20 @@ func (emailChannel) Validate(cfg map[string]any) error {
 	}
 	if len(cfgStrings(cfg, "to")) == 0 {
 		return errors.New("at least one recipient address is required")
+	}
+	return checkMailAddresses(cfgString(cfg, "from"), cfgStrings(cfg, "to"))
+}
+
+// checkMailAddresses rejects values that could inject SMTP commands or headers (a line
+// break) and anything that is not a mailbox.
+func checkMailAddresses(from string, to []string) error {
+	for _, addr := range append([]string{from}, to...) {
+		if strings.ContainsAny(addr, "\r\n") {
+			return fmt.Errorf("address %q contains a line break", addr)
+		}
+		if _, err := mail.ParseAddress(addr); err != nil {
+			return fmt.Errorf("invalid address %q: %w", addr, err)
+		}
 	}
 	return nil
 }
@@ -217,6 +232,9 @@ func smtpReplyCode(text string) int {
 // over-long lines; second, base64 never produces a line starting with ".",
 // avoiding SMTP dot-stuffing entirely.
 func buildEmailMessage(from string, to []string, m Message) (string, error) {
+	if err := checkMailAddresses(from, to); err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "From: %s\r\n", from)
 	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))

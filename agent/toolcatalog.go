@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"sync"
 
 	actool "github.com/Autumn-27/norma/tool"
@@ -115,7 +116,7 @@ func BuiltinToolSeeds() []ToolSeed {
 		out = append(out, ToolSeed{
 			Key:    k,
 			Desc:   a.tool.Description(),
-			Schema: a.tool.InputSchema(),
+			Schema: sanitizeSchema(a.tool.InputSchema()),
 			Agents: agents,
 		})
 	}
@@ -151,6 +152,78 @@ func ToolResolve() ToolResolveFunc {
 	return toolResolve
 }
 
+// sanitizeSchema elimina entradas de "required" que no estan declaradas en
+// "properties" (recursivamente). Gemini rechaza la peticion completa si un
+// esquema es inconsistente; los demas proveedores lo ignoran en silencio.
+// Tambien limpia "required": [] vacios, que algunos validadores rechazan.
+func sanitizeSchema(schema map[string]any) map[string]any {
+	if len(schema) == 0 {
+		return schema
+	}
+	out, _ := sanitizeNode(schema).(map[string]any)
+	if out == nil {
+		return schema
+	}
+	return out
+}
+
+func sanitizeNode(v any) any {
+	switch m := v.(type) {
+	case map[string]any:
+		props, _ := m["properties"].(map[string]any)
+		for k, val := range props {
+			props[k] = sanitizeNode(val)
+		}
+		if items, ok := m["items"]; ok {
+			m["items"] = sanitizeNode(items)
+		}
+		for _, key := range []string{"anyOf", "oneOf", "allOf", "prefixItems"} {
+			if arr, ok := m[key].([]any); ok {
+				for i := range arr {
+					arr[i] = sanitizeNode(arr[i])
+				}
+			}
+		}
+		if reqRaw, ok := m["required"]; ok {
+			var req []any
+			switch r := reqRaw.(type) {
+			case []any:
+				req = r
+			case []string:
+				for _, x := range r {
+					req = append(req, x)
+				}
+			}
+			limpio := make([]any, 0, len(req))
+			for _, r := range req {
+				s, ok := r.(string)
+				if !ok {
+					continue
+				}
+				if props != nil {
+					if _, existe := props[s]; existe {
+						limpio = append(limpio, s)
+						continue
+					}
+				}
+				log.Printf("[schema] required %q sin properties: se elimina del esquema", s)
+			}
+			if len(limpio) == 0 {
+				delete(m, "required")
+			} else {
+				m["required"] = limpio
+			}
+		}
+		return m
+	case []any:
+		for i := range m {
+			m[i] = sanitizeNode(m[i])
+		}
+		return m
+	}
+	return v
+}
+
 // DecorateTool wraps t so Description()/InputSchema() report the DB overrides and
 // Call() injects scalar parameter defaults (from schema's "default" props) whenever
 // the model omitted them. Name/Prompt/permission/scheduler flags delegate to t, so
@@ -165,6 +238,7 @@ func DecorateTool(t actool.CoreTool, desc string, schema map[string]any) actool.
 	if t.Name() == "record_fact" {
 		schema = RepairRecordFactSchema(schema)
 	}
+	schema = sanitizeSchema(schema)
 	return &overriddenTool{CoreTool: t, desc: desc, schema: schema}
 }
 
@@ -206,6 +280,9 @@ func injectDefaults(in json.RawMessage, schema map[string]any) json.RawMessage {
 		if err := json.Unmarshal(in, &m); err != nil {
 			return in // non-object input: don't touch it
 		}
+	}
+	if m == nil {
+		m = map[string]json.RawMessage{} // a JSON null unmarshals to a nil map
 	}
 	changed := false
 	for k, dv := range defs {

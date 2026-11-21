@@ -410,7 +410,7 @@ export type GoalState = "open" | "met" | "abandoned";
 export type IntentState = "open" | "running" | "paused" | "done" | "blocked" | "exhausted" | "stopped";
 export type FindingState = "confirmed" | "dismissed";
 export type HintState = "active" | "consumed";
-export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers";
+export type ExploreRel = "spawns" | "derived_from" | "yields" | "proves" | "covers" | "blocked_by" | "triggers" | "leads_to";
 
 export interface TaskNode {
   id: string;
@@ -423,6 +423,32 @@ export interface TaskNode {
   source_task_id?: string;
   inherited?: boolean;
   delete_reason?: string; // deletion reason when the intent is soft-deleted (state='deleted')
+  // Extended fields for exploration graph nodes (stored as JSON in payload, but accessible as typed fields)
+  duration_seconds?: number;
+  tokens_used?: number;
+  task_id?: string;
+}
+
+export interface GraphMetrics {
+  total_nodes: number;
+  total_edges: number;
+  by_type: Record<string, number>;
+  by_state: Record<string, number>;
+  goals: { total: number; met: number; open: number };
+  intents: { total: number; done: number; running: number; open: number } & Record<string, number>;
+  facts: { total: number } & Record<string, number>;
+  findings: { total: number; confirmed: number; dismissed: number };
+  hints: { total: number; active: number; consumed: number };
+  digests: { total: number };
+  hexstrike_integration?: {
+    version: string;
+    tools_available: number;
+    tools_healthy: number;
+    connectivity_status: "online" | "offline" | "degraded";
+    notes?: string;
+  };
+  progress_percent: number;
+  last_updated: string;
 }
 
 // One broadcast board page: nodes paginated by creation order + the edges involved on this

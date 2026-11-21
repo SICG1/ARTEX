@@ -295,6 +295,10 @@ LIMIT 1`, taskID).Scan(&dependent)
 		}
 		sources = append(sources, id)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
@@ -664,6 +668,10 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		}
 		sources = append(sources, id)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
@@ -726,6 +734,10 @@ AND NOT EXISTS (
 			return nil, nil, nil, nil, err
 		}
 		exclusiveIDs = append(exclusiveIDs, id)
+	}
+	if err := rowsID.Err(); err != nil {
+		rowsID.Close()
+		return nil, nil, nil, nil, err
 	}
 	if err := rowsID.Close(); err != nil {
 		return nil, nil, nil, nil, err

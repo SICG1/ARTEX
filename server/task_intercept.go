@@ -1,6 +1,8 @@
 package server
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -133,6 +135,10 @@ func (s *Server) taskInterceptUpdateRule(w http.ResponseWriter, r *http.Request)
 	}
 	rule, err := pg.Assets().UpdateTaskInterceptRule(taskID, ruleID, req.Action, req.Kind, req.Pattern, req.Note, req.Enabled)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, 404, "regla no encontrada")
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}
@@ -185,6 +191,10 @@ func (s *Server) taskInterceptToggleRule(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := pg.Assets().ToggleTaskInterceptRule(taskID, ruleID, req.Enabled); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, 404, "regla no encontrada")
+			return
+		}
 		writeErr(w, 500, err.Error())
 		return
 	}

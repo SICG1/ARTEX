@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"log"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -16,7 +17,12 @@ func constraintBlock(ts *db.ExplorationStore) string {
 		return ""
 	}
 	rows, err := ts.ListConstraints()
-	if err != nil || len(rows) == 0 {
+	if err != nil {
+		// Say so in the prompt: a silent empty block would drop the operator's limits.
+		log.Printf("[constraints] cannot read operation constraints: %v", err)
+		return "\n\n[Operation constraints could not be loaded because of a read error. Their limits are unknown: state in your report that the constraints were not loaded.]"
+	}
+	if len(rows) == 0 {
 		return ""
 	}
 	var allow, deny []string

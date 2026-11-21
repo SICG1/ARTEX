@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
@@ -154,7 +155,7 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 			emit(r)
 		}
 	}
-	captureRun(ctx, agentcore.Options{
+	if _, _, err := captureRun(ctx, agentcore.Options{
 		Provider:               prov,
 		SystemPrompt:           []string{sys},
 		Tools:                  tools,
@@ -164,7 +165,9 @@ func DecomposeGoalsWithProvider(ctx context.Context, prov llm.Provider, dataDir,
 		MaxTurns:     8,
 		NonStreaming: nonStreaming, // when this profile selects non-streaming, use Provider.Complete
 		MaxTokens:    maxTokens,    // 0 = send no cap, the server's default decides
-	}, userMsg, captureEmit)
+	}, userMsg, captureEmit); err != nil {
+		log.Printf("[goals] goal decomposition failed, the caller falls back: %v", err)
+	}
 	// set_goals persisted the goals directly; read them back so the caller sees what
 	// was written (empty slice ⇒ the LLM produced nothing ⇒ caller falls back).
 	if ts == nil {

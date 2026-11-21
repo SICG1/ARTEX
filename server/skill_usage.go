@@ -6,6 +6,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Autumn-27/norma/skill"
 	actool "github.com/Autumn-27/norma/tool"
@@ -70,7 +71,11 @@ func (m *meteredSkill) record(input json.RawMessage) {
 		}
 	}
 	if len(name) > maxLedgerSkillName {
-		name = name[:maxLedgerSkillName]
+		cut := maxLedgerSkillName
+		for cut > 0 && !utf8.RuneStart(name[cut]) { // never cut inside a multi-byte character
+			cut--
+		}
+		name = name[:cut]
 	}
 	err := m.pg.InsertSkillUsage(&db.SkillUsage{
 		Skill:         name,

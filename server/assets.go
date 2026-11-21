@@ -20,7 +20,7 @@ const maxCompanyMutationBodyBytes = 2 << 20
 
 func decodeCompanyMutationRequest(w http.ResponseWriter, r *http.Request, value any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxCompanyMutationBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(value); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(value); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			writeErr(w, http.StatusRequestEntityTooLarge, "Request body too large")
@@ -260,7 +260,7 @@ func (s *Server) deleteCompany(w http.ResponseWriter, r *http.Request) {
 	}
 	// The body is optional. Only an actual empty body is ignored; malformed or
 	// trailing JSON is a client error.
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(jsonBody(r))
 	if err := decoder.Decode(&req); err != nil {
 		if !errors.Is(err, io.EOF) {
 			writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -426,12 +426,16 @@ func (s *Server) deleteAssets(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IDs []int64 `json:"ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
 	if len(req.IDs) == 0 {
 		writeErr(w, 400, "ids required")
+		return
+	}
+	if len(req.IDs) > 20000 { // a bound far above any real selection; PostgreSQL itself takes at most 65535 parameters
+		writeErr(w, 400, "demasiados ids en una petición (máximo 20000)")
 		return
 	}
 	deleted, err := as.DeleteByIDs(req.IDs)
@@ -488,11 +492,10 @@ func (s *Server) insertAssets(w http.ResponseWriter, r *http.Request) {
 			Params []map[string]any `json:"params"`
 		} `json:"assets"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
-
 	type result struct {
 		Index int    `json:"index"`
 		ID    int64  `json:"id"`

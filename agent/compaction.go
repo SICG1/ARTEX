@@ -245,6 +245,7 @@ func (c *Compactor) major(ctx context.Context, ts *db.ExplorationStore) {
 	}
 	if err := ts.SupersedeDigests(stale); err != nil {
 		log.Printf("[compaction] supersede exp=%d: %v", ts.ID(), err)
+		return // no new digests this pass: a node must never sit in two digests
 	}
 	for _, b := range toCreate {
 		c.foldBlock(ctx, ts, g, b, nodeByID, cvers, c.generationFor(b, active))
@@ -546,9 +547,13 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 		MaxTokens: 1500,
 		Thinking:  "disabled",
 	}
-	msg, _, _, err := c.prov.Complete(ctx, req)
+	msg, stop, _, err := c.prov.Complete(ctx, req)
 	if err != nil {
 		return "", err
+	}
+	// A reply cut at the token limit is not a conclusion: fail, so the block is not folded.
+	if stop == "max_tokens" {
+		return "", fmt.Errorf("compression reply hit the %d-token limit", req.MaxTokens)
 	}
 	body := strings.TrimSpace(msg.Text())
 	if body == "" {

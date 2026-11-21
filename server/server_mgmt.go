@@ -456,7 +456,7 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 		TriggerMergeMode   *string `json:"trigger_merge_mode"`
 		TriggerMaxParallel *int    `json:"trigger_max_parallel"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -1692,6 +1692,10 @@ func (s *Server) fsUploadSkill(w http.ResponseWriter, r *http.Request) {
 		rc.Close()
 		if err != nil {
 			writeErr(w, 500, err.Error())
+			return
+		}
+		if n > maxSkillFileBytes {
+			writeErr(w, 400, "archivo demasiado grande tras extraerlo")
 			return
 		}
 		total += n

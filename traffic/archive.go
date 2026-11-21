@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -69,7 +71,7 @@ func (t *Traffic) ExportHosts(hosts []string, dir string) (int64, error) {
 		args[i] = host
 	}
 	rows, err := t.db.Query(`SELECT id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path
-FROM exchanges WHERE host IN (`+strings.Join(placeholders, ",")+`) ORDER BY ts,id`, args...)
+FROM exchanges WHERE lower(host) IN (`+strings.Join(placeholders, ",")+`) ORDER BY ts,id`, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -87,15 +89,11 @@ FROM exchanges WHERE host IN (`+strings.Join(placeholders, ",")+`) ORDER BY ts,i
 		err := t.db.QueryRow(`SELECT req_head,req_body,req_blob,resp_head,resp_body,resp_blob
 FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &reqBlob, &item.RespHead, &item.RespBody, &respBlob)
 		if errors.Is(err, sql.ErrNoRows) && strings.TrimSpace(legacyPath) != "" {
-			req, readErr := os.ReadFile(filepath.Join(t.dir, legacyPath, "request.http"))
-			if readErr != nil && !os.IsNotExist(readErr) {
-				return 0, readErr
+			req, resp, readErr := legacyHeads(t.dir, legacyPath)
+			if readErr != nil {
+				return 0, fmt.Errorf("intercambio %s: %w", item.ID, readErr)
 			}
-			resp, readErr := os.ReadFile(filepath.Join(t.dir, legacyPath, "response.http"))
-			if readErr != nil && !os.IsNotExist(readErr) {
-				return 0, readErr
-			}
-			item.ReqHead, item.RespHead = string(req), string(resp)
+			item.ReqHead, item.RespHead = req, resp
 		} else if err != nil {
 			return 0, err
 		}
@@ -151,6 +149,52 @@ FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &r
 	return int64(len(snapshot.Exchanges)), nil
 }
 
+// legacyHeads reads the request and response heads of a legacy exchange. A missing file leaves
+// that head empty and is logged, so archiving goes on; any other read error stops it.
+func legacyHeads(root, legacyPath string) (string, string, error) {
+	read := func(name string) (string, error) {
+		b, err := os.ReadFile(filepath.Join(root, legacyPath, name))
+		if os.IsNotExist(err) {
+			log.Printf("[traffic] WARNING: legacy head %s is missing in %s; archiving that exchange without it", name, legacyPath)
+			return "", nil
+		}
+		return string(b), err
+	}
+	req, err := read("request.http")
+	if err != nil {
+		return "", "", fmt.Errorf("no se puede leer el historial legacy: %w", err)
+	}
+	resp, err := read("response.http")
+	if err != nil {
+		return "", "", fmt.Errorf("no se puede leer el historial legacy: %w", err)
+	}
+	return req, resp, nil
+}
+
+// blobIntact reports whether path holds a file whose SHA-256 is sum.
+func blobIntact(path string, sum [32]byte) bool {
+	b, err := os.ReadFile(path)
+	return err == nil && sha256.Sum256(b) == sum
+}
+
+// copyFileTo streams src into a new file at dst with mode 0600, so a large blob never sits in memory.
+func copyFileTo(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
 // ImportArchive imports only missing exchange IDs. Current hot rows always win,
 // and repeated restore attempts are safe after a partial external failure.
 // Version 1 archives carry no rewrite provenance (imported as unrewritten).
@@ -191,11 +235,12 @@ func (t *Traffic) ImportArchive(dir string) (int64, error) {
 			return 0, fmt.Errorf("traffic blob checksum mismatch: %s", hash)
 		}
 		destination := filepath.Join(t.dir, "_blobs", "sha256", hash[:2], hash+".bin")
-		if _, err := os.Stat(destination); os.IsNotExist(err) {
-			if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		if !blobIntact(destination, sum) {
+			// A missing or partial file from an earlier attempt is replaced, never kept.
+			if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 				return 0, err
 			}
-			if err := os.WriteFile(destination, data, 0o644); err != nil {
+			if err := writeFileAtomic(destination, data, 0o600); err != nil {
 				return 0, err
 			}
 		}

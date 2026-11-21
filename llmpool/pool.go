@@ -2,6 +2,7 @@ package llmpool
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -138,9 +139,12 @@ func (p *Pool) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Mes
 		}
 		if !shouldFailover(ctx, err) {
 			// Non-failover error (e.g. ctx cancel, deterministic 4xx): surface as-is
-			// without tripping health. RecordCall clears the state on an atomic
-			// call, matching the historical Pass here.
-			p.health.RecordCall(ctx, m.ID, false, false, err)
+			// without tripping health. Only a profile that answered with a status says
+			// something about its health: a cancelled call must leave an open breaker
+			// untouched (see cancel_breaker_test.go).
+			if statusOf(err) != 0 {
+				p.health.RecordCall(ctx, m.ID, false, false, err)
+			}
 			return llm.Message{}, "", llm.Usage{}, err
 		}
 		lastErr = err
@@ -284,9 +288,9 @@ func estimateTokens(req llm.CompletionRequest) int {
 		n += blocksLen(m.Content)
 	}
 	for _, t := range req.Tools {
-		// InputSchema is a decoded map, so its serialized size isn't available
-		// cheaply — charge a flat ~120 chars per top-level property instead.
-		n += len(t.Name) + len(t.Description) + len(t.InputSchema)*120
+		// Charge the schema at its serialized size: a flat per-property charge underestimated large schemas.
+		schema, _ := json.Marshal(t.InputSchema)
+		n += len(t.Name) + len(t.Description) + len(schema)
 	}
 	return n * 2 / 7 // ≈ len/3.5
 }

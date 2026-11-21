@@ -61,7 +61,7 @@ func (t *Traffic) RecordExternal(e ExternalExchange) error {
 	defer t.wmu.Unlock()
 
 	// Bodies are spilled before the transaction opens, matching record().
-	reqB := t.spill([]byte(e.RequestBody), e.RequestHeaders["content-type"])
+	reqB := t.spill([]byte(e.RequestBody), headerValue(e.RequestHeaders, "content-type"))
 	respB := t.spill([]byte(e.ResponseBody), respCT)
 
 	n := t.seq.Add(1)
@@ -69,7 +69,7 @@ func (t *Traffic) RecordExternal(e ExternalExchange) error {
 	id := fmt.Sprintf("%d-%04d", now.Unix(), n%10000)
 
 	if err := t.insertExchange(id, now.Unix(), host, method, db.TemplatePath(u.EscapedPath()), u.String(), status, respCT, len(e.RequestBody), len(e.ResponseBody), reqHead, reqB, respHead, respB); err != nil {
-		log.Printf("[traffic] failed to ingest %s: %v", u.String(), err)
+		log.Printf("[traffic] failed to ingest %s: %v", logURL(u.String()), err)
 		return err
 	}
 	return nil

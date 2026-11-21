@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"log"
 
 	"github.com/Autumn-27/artex/db"
 	actool "github.com/Autumn-27/norma/tool"
@@ -94,7 +95,11 @@ func (t *ToolSet) taskCredentialOverview() []map[string]any {
 		return nil
 	}
 	list, err := t.ts.TaskCredentials(t.taskID)
-	if err != nil || len(list) == 0 {
+	if err != nil {
+		log.Printf("[tools] task credentials unreadable: %v", err)
+		return []map[string]any{{"unavailable": "task credentials could not be read; do not assume there are no test accounts"}}
+	}
+	if len(list) == 0 {
 		return nil
 	}
 	out := make([]map[string]any, 0, len(list))

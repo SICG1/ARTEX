@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -104,6 +105,73 @@ func ValidSeverity(s string) bool {
 	return false
 }
 
+// normalizarNombre reduce un titulo a una forma comparable: minusculas, sin
+// acentos, sin puntuacion y con espacios colapsados.
+func normalizarNombre(s string) string {
+	var b strings.Builder
+	anteriorEspacio := true
+	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
+		switch r {
+		case 'á', 'à', 'ä', 'â':
+			r = 'a'
+		case 'é', 'è', 'ë', 'ê':
+			r = 'e'
+		case 'í', 'ì', 'ï', 'î':
+			r = 'i'
+		case 'ó', 'ò', 'ö', 'ô':
+			r = 'o'
+		case 'ú', 'ù', 'ü', 'û':
+			r = 'u'
+		}
+		if r == '_' || r == '-' || r == '/' || r == ':' || r == '.' {
+			r = ' '
+		}
+		if r == ' ' || r == '\t' {
+			if !anteriorEspacio {
+				b.WriteRune(' ')
+				anteriorEspacio = true
+			}
+			continue
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			anteriorEspacio = false
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// buscarHallazgoEquivalente devuelve el id de un hallazgo ya registrado en la
+// misma tarea que sea equivalente: mismo titulo normalizado, o misma clase de
+// vulnerabilidad con los mismos activos y la misma severidad.
+func (d *DB) buscarHallazgoEquivalente(taskID int64, vulnclass, name, severity string, assetIDs []int64) (int64, error) {
+	if taskID <= 0 {
+		return 0, nil
+	}
+	aidsJSON, _ := json.Marshal(assetIDs)
+	if assetIDs == nil {
+		aidsJSON = []byte("[]")
+	}
+	nombre := normalizarNombre(name)
+	clase := normalizarNombre(vulnclass)
+	var id int64
+	err := d.QueryRow(`
+		SELECT id FROM findings
+		WHERE task_id = $1
+		  AND COALESCE(status,'pending') NOT IN ('duplicate','false_positive')
+		  AND (
+		        ($2 <> '' AND lower(regexp_replace(COALESCE(name,''), '[^a-zA-Z0-9]+', ' ', 'g')) = lower(regexp_replace($3, '[^a-zA-Z0-9]+', ' ', 'g')))
+		     OR ($4 <> '' AND lower(regexp_replace(COALESCE(vulnclass,''), '[^a-zA-Z0-9]+', ' ', 'g')) = lower(regexp_replace($4, '[^a-zA-Z0-9]+', ' ', 'g'))
+		         AND COALESCE(asset_ids,'[]'::jsonb) = $5::jsonb AND COALESCE(severity,'') = $6)
+		  )
+		ORDER BY id LIMIT 1`,
+		taskID, nombre, nombre, clase, string(aidsJSON), severity).Scan(&id)
+	if err != nil {
+		return 0, nil
+	}
+	return id, nil
+}
+
 // AddFinding inserts a finding into the standalone findings table. taskID and
 // nodeID may be 0 (stored as NULL). name may be "" (frontend falls back to
 // vulnclass). Returns the new finding id.
@@ -118,6 +186,10 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 	}
 	if nodeID > 0 {
 		nid = &nodeID
+	}
+	if existente, _ := d.buscarHallazgoEquivalente(taskID, vulnclass, name, severity, assetIDs); existente > 0 {
+		log.Printf("[findings] duplicado evitado: task=%d clase=%q name=%q ya existe como #%d", taskID, vulnclass, name, existente)
+		return existente, nil
 	}
 	var id int64
 	err := d.QueryRow(

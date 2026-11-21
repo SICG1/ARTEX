@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
@@ -200,7 +201,8 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// A corrupt or unreadable transcript stops the turn before any model or tool call.
 	if m.tx != nil {
 		if err := resumeSession(s, opts.SessionID); err != nil {
-			return "", err
+			// Unreadable history must not stop the conversation: continue and log it.
+			log.Printf("[main-agent] WARNING: cannot reload the conversation, continuing without its history: %v", err)
 		}
 	}
 	// C2: this session is fresh each turn; re-unlock skill-gated MCPs from prior

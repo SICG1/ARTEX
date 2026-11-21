@@ -144,15 +144,19 @@ func (r *Registry) Trip(id int64, errMsg string, hard bool) (tripped bool) {
 		st = &State{}
 		r.m[id] = st
 	}
-	st.Fails++
 	st.LastError = errMsg
 	st.LastAt = time.Now()
-	softTrip := r.tripAfter()
-	if hard || (softTrip > 0 && st.Fails >= softTrip) {
-		st.Trips++
-		st.OpenUntil = time.Now().Add(r.coolFor(st.Trips))
-		st.Fails = 0 // counted into this trip; start fresh for the half-open probe
-		tripped = true
+	// A request sent before the breaker opened can fail after it: record that failure, but do
+	// not count it again or extend the cooldown.
+	if !st.OpenUntil.After(time.Now()) {
+		st.Fails++
+		softTrip := r.tripAfter()
+		if hard || (softTrip > 0 && st.Fails >= softTrip) {
+			st.Trips++
+			st.OpenUntil = time.Now().Add(r.coolFor(st.Trips))
+			st.Fails = 0 // counted into this trip; start fresh for the half-open probe
+			tripped = true
+		}
 	}
 	if r.persist != nil {
 		r.persist(id, *st)

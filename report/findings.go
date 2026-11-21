@@ -20,7 +20,7 @@ import (
 // sortFindingsForExport sorts by severity descending, then by time descending, consistent with the summary report's grouping.
 func sortFindingsForExport(fs []*db.DBFinding) {
 	sort.SliceStable(fs, func(i, j int) bool {
-		ri, rj := sevRank[fs[i].Severity], sevRank[fs[j].Severity]
+		ri, rj := severityRank(fs[i].Severity), severityRank(fs[j].Severity)
 		if ri != rj {
 			return ri < rj // smaller sevRank means more severe
 		}
@@ -31,6 +31,15 @@ func sortFindingsForExport(fs []*db.DBFinding) {
 // findingTitle returns the vulnerability's readable title: name → class → "Uncategorized".
 func findingTitle(f *db.DBFinding) string {
 	return nz(f.Name, nz(f.VulnClass, "Uncategorized"))
+}
+
+// summaryKey maps a severity to a summary row: the four known names, lower case; anything else is info.
+func summaryKey(sev string) string {
+	switch k := strings.ToLower(strings.TrimSpace(sev)); k {
+	case "critical", "high", "medium", "low":
+		return k
+	}
+	return "info"
 }
 
 // FindingsMarkdown combines a batch of findings into a summary report (summary + grouped by severity,
@@ -47,12 +56,12 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 	// Summary: counts per severity.
 	counts := map[string]int{}
 	for _, f := range items {
-		counts[f.Severity]++
+		counts[summaryKey(f.Severity)]++
 	}
 	b.WriteString("## Summary\n\n")
 	b.WriteString("| Severity | Count |\n| --- | --- |\n")
 	for _, s := range []struct{ key, label string }{
-		{"critical", "Critical"}, {"high", "High"}, {"medium", "Medium"}, {"low", "Low"},
+		{"critical", "Critical"}, {"high", "High"}, {"medium", "Medium"}, {"low", "Low"}, {"info", "Info / other"},
 	} {
 		fmt.Fprintf(&b, "| %s | %d |\n", s.label, counts[s.key])
 	}
@@ -81,7 +90,8 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 			fmt.Fprintf(&b, "%s\n\n", s)
 		}
 		if e := strings.TrimSpace(f.Evidence); e != "" {
-			fmt.Fprintf(&b, "**Evidence:**\n\n```\n%s\n```\n\n", e)
+			fence := codeFence(e)
+			fmt.Fprintf(&b, "**Evidence:**\n\n%s\n%s\n%s\n\n", fence, e, fence)
 		}
 		b.WriteString(qualityNarrative(q))
 		b.WriteString(detailedReportFull(f.Report, "**Detailed report:**"))
@@ -89,6 +99,21 @@ func FindingsMarkdown(fs []*db.DBFinding, generatedAt time.Time) string {
 		b.WriteString("---\n\n")
 	}
 	return b.String()
+}
+
+// codeFence returns a backtick fence longer than any run of backticks in text, so the text
+// cannot close the code block early. It is never shorter than three backticks.
+func codeFence(text string) string {
+	longest, run := 0, 0
+	for i := 0; i < len(text); i++ {
+		if text[i] == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	return strings.Repeat("`", max(3, longest+1))
 }
 
 // SingleFindingMarkdown renders a single vulnerability as a standalone Markdown (used for "one file per vulnerability" packaging).
@@ -112,7 +137,8 @@ func SingleFindingMarkdown(f *db.DBFinding, generatedAt time.Time) string {
 		fmt.Fprintf(&b, "## Summary\n\n%s\n\n", s)
 	}
 	if e := strings.TrimSpace(f.Evidence); e != "" {
-		fmt.Fprintf(&b, "## Evidence\n\n```\n%s\n```\n\n", e)
+		fence := codeFence(e)
+		fmt.Fprintf(&b, "## Evidence\n\n%s\n%s\n%s\n\n", fence, e, fence)
 	}
 	b.WriteString(qualityNarrative(q))
 	b.WriteString(detailedReportFull(f.Report, "## Detailed Report"))
@@ -135,8 +161,8 @@ func FindingFilename(f *db.DBFinding) string {
 	}
 	// Defensive: strip one more path layer to rule out zip slip.
 	name = path.Base(name)
-	if len(name) > 120 {
-		name = strings.ToValidUTF8(name[:120], "")
+	if r := []rune(name); len(r) > 120 { // cut by runes: a byte cut can split a UTF-8 character
+		name = string(r[:120])
 	}
 	return name + ".md"
 }
@@ -173,6 +199,9 @@ func FindingsCSV(fs []*db.DBFinding) []byte {
 // csvCell prefixes cells that spreadsheet apps treat as formulas. encoding/csv
 // only quotes delimiters; Excel/LibreOffice still evaluate a leading
 // '=', '+', '-', '@', tab, or CR when the file is opened.
+// csvSafe is the earlier name of csvCell, kept for the local tests.
+func csvSafe(s string) string { return csvCell(s) }
+
 func csvCell(s string) string {
 	if s == "" {
 		return s

@@ -211,15 +211,22 @@ func run() int {
 		IdleTimeout:       2 * time.Minute,
 	}
 
+	serveErr := make(chan error, 1)
 	go func() {
 		log.Printf("ARTEX %s backend listening on %s (data=%s, workers=%d)", version, *addr, *dataDir, mgr.Workers())
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("serve: %v", err)
+			serveErr <- err
 		}
 	}()
 
-	// Wait for a stop signal.
-	<-ctx.Done()
+	// Wait for a stop signal, or for the listener to fail (a busy port, for example). A failure
+	// returns through run, so the deferred cleanup still runs.
+	select {
+	case <-ctx.Done():
+	case err := <-serveErr:
+		log.Printf("serve: %v", err)
+		return 1
+	}
 
 	log.Println("shutting down...")
 	// Close the listener before draining. Otherwise a request accepted during

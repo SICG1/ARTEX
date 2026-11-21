@@ -64,7 +64,7 @@ func (s *Server) addTaskCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req taskCredentialReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
 		return
 	}

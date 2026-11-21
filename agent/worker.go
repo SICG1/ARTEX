@@ -581,7 +581,12 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	dynamicTail += renderIntentTask(intent)
 	if as != nil {
 		if ids := intentAssetIDs(intent); len(ids) > 0 {
-			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
+			assets, err := as.GetByIDs(ids)
+			if err != nil {
+				// Start without the intent's targets, as before, and leave a trace in the log.
+				log.Printf("[worker] WARNING: cannot read the intent's target assets, starting without them: %v", err)
+			}
+			if len(assets) > 0 {
 				if block := renderWorkerIntentAssets(assets, workerEnv); block != "" {
 					if strings.TrimSpace(overview) == "" {
 						overview = workerEnv.intro() + block
@@ -706,11 +711,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// restarting from scratch.
 	alreadyRecorded := false
 	if w.tx != nil {
-		// A corrupt or unreadable transcript stops the run before any model or tool
-		// call. No terminal reason: the engine marks the intent blocked without the
-		// model_error reruns, which would only fail the same way again.
 		if err := resumeSession(s, opts.SessionID); err != nil {
-			return "", tsx.Writes(), err
+			// An unreadable transcript must not stop the run: continue from scratch and log it.
+			log.Printf("[worker] WARNING: cannot reload the worker transcript, continuing from scratch: %v", err)
 		}
 		alreadyRecorded = requestID != "" && hasWorkerChatMessage(s.Messages(), requestID)
 		if len(s.Messages()) > 0 && message == "" {

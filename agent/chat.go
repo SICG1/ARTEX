@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,7 +227,8 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// A corrupt or unreadable transcript stops the turn before any model or tool call.
 	if c.tx != nil {
 		if err := resumeSession(s, opts.SessionID); err != nil {
-			return "", err
+			// Unreadable history must not stop the chat: continue and log it.
+			log.Printf("[chat] WARNING: cannot reload the conversation, continuing without its history: %v", err)
 		}
 	}
 	// re-unlock skill-gated MCPs from prior Skill() calls in the reloaded history so

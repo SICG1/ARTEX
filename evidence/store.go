@@ -93,12 +93,14 @@ func (s *Store) writeBody(r io.Reader, expectedLength int64, expectedHash string
 		return "", err
 	}
 	if _, err = os.Stat(path); err == nil {
-		if err = verifyFile(path, hash, n); err != nil {
-			return "", err
+		verr := verifyFile(path, hash, n)
+		if verr == nil {
+			// Refresh the grace period for a restored but not-yet-committed body.
+			now := time.Now()
+			return hash, os.Chtimes(path, now, now)
 		}
-		// Refresh the grace period for a restored but not-yet-committed body.
-		now := time.Now()
-		return hash, os.Chtimes(path, now, now)
+		// The copy on disk does not match its hash: the body just staged and verified replaces it.
+		log.Printf("[evidence] blob %s damaged on disk (%v); replaced by the verified body", hash, verr)
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
@@ -376,7 +378,9 @@ func (s *Store) WithInstalledSnapshots(ctx context.Context, snapshots []db.Traff
 }
 
 func (s *Store) Collect(ctx context.Context, now time.Time) error {
-	return s.DB.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
+	var stale []string // blobs to delete only after the transaction has committed
+	err := s.DB.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
+		stale = stale[:0]
 		if _, err := tx.Exec(`UPDATE traffic_evidence_snapshots s SET unreferenced_at=$1
 WHERE unreferenced_at IS NULL AND NOT EXISTS(SELECT 1 FROM finding_traffic_bindings b WHERE b.snapshot_id=s.id)`, now); err != nil {
 			return err
@@ -424,7 +428,8 @@ AND NOT EXISTS(SELECT 1 FROM finding_traffic_bindings b WHERE b.snapshot_id=s.id
 				if now.Sub(info.ModTime()) < 24*time.Hour {
 					return nil
 				}
-				return os.Remove(path)
+				stale = append(stale, path)
+				return nil
 			})
 			if err != nil {
 				return err
@@ -432,6 +437,15 @@ AND NOT EXISTS(SELECT 1 FROM finding_traffic_bindings b WHERE b.snapshot_id=s.id
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	for _, p := range stale {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) RunGC(ctx context.Context) {

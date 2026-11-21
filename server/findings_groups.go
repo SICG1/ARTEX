@@ -101,7 +101,7 @@ func (s *Server) deepenFinding(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Description string `json:"description"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			writeErr(w, http.StatusRequestEntityTooLarge, "Request body too large")

@@ -176,9 +176,20 @@ func PostgresDSN() (dsn, source string, err error) {
 		return d, "config file " + Path() + " (database.dsn)", nil
 	}
 	if db.Host != "" || db.DBName != "" || db.User != "" {
+		if err := checkDBPort(db.Port); err != nil {
+			return "", "", fmt.Errorf("config file %s: %w", Path(), err)
+		}
 		return db.buildDSN(), "config file " + Path() + " (database fields)", nil
 	}
 	return "", "", fmt.Errorf("no database config found: the environment variable ARTEX_PG_DSN is not set, and config file %s provides no database (dsn or host/user/dbname). Create the config file or set the environment variable and retry", Path())
+}
+
+// checkDBPort rejects a port outside 1-65535. Zero means the default port and is accepted.
+func checkDBPort(port int) error {
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("database port %d is out of range 1-65535", port)
+	}
+	return nil
 }
 
 func (d Database) buildDSN() string {
@@ -214,10 +225,14 @@ func (d Database) buildDSN() string {
 // values. pgx accepts this form as well as the URL form.
 var libpqPassword = regexp.MustCompile(`(?i)\b(password)\s*=\s*(?:'[^']*'|"[^"]*"|\S*)`)
 
+// urlUserinfoPass masks the password in a URL whose parse failed (e.g. a bad
+// percent escape), so an unparseable DSN cannot print the secret.
+var urlUserinfoPass = regexp.MustCompile(`(://[^:/@\s]+:)([^@\s/]*)`)
+
 // Redact is a log-safe view of a PostgreSQL DSN. It masks URL userinfo
 // passwords, `?password=` query values, and libpq `password=` keywords.
-// Unrecognised input still runs the keyword mask so a parse failure cannot
-// print the secret.
+// Unrecognised input still runs both masks so a parse failure cannot print the
+// secret.
 func Redact(dsn string) string {
 	if dsn == "" {
 		return dsn
@@ -233,7 +248,8 @@ func Redact(dsn string) string {
 			q.Set("password", "****")
 			u.RawQuery = q.Encode()
 		}
-		return u.String()
+		return libpqPassword.ReplaceAllString(u.String(), `${1}=****`)
 	}
-	return libpqPassword.ReplaceAllString(dsn, `${1}=****`)
+	out := libpqPassword.ReplaceAllString(dsn, `${1}=****`)
+	return urlUserinfoPass.ReplaceAllString(out, `${1}****`)
 }

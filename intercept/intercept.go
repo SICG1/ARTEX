@@ -413,16 +413,23 @@ func (i *Interceptor) GetEnabledTools() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return enabledToolNames(val, ok), nil
+}
+
+// enabledToolNames returns the names in the intercept_enabled_tools setting. The defaults
+// apply when the setting is unset; a malformed setting enables nothing, as before, and logs a warning.
+func enabledToolNames(val string, ok bool) []string {
 	if !ok {
 		out := make([]string, len(defaultEnabledTools))
 		copy(out, defaultEnabledTools)
-		return out, nil
+		return out
 	}
 	var names []string
 	if err := json.Unmarshal([]byte(val), &names); err != nil {
-		return nil, fmt.Errorf("intercept_enabled_tools is not valid JSON: %w", err)
+		log.Printf("[intercept] WARNING: intercept_enabled_tools is malformed, no tool enters the rules: %v", err)
+		return []string{}
 	}
-	return names, nil
+	return names
 }
 
 // SetEnabledTools persists the list of tool names that should enter the intercept

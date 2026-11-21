@@ -162,6 +162,9 @@ type teeBody struct {
 	a  *attempt
 }
 
+// maxCapturedBody bounds the raw response kept per attempt; a long stream must not fill memory.
+const maxCapturedBody = 8 << 20
+
 func (t *teeBody) Read(p []byte) (int, error) {
 	n, err := t.rc.Read(p)
 	if n > 0 {

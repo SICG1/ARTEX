@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -90,7 +91,7 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	dir := filepath.Join(base, "uploads")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		writeErr(w, 500, "failed to create directory: "+err.Error())
+		writeErr(w, 500, "failed to create directory: "+publicErr(err))
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatUpload+chatUploadMultipartOverhead)
@@ -117,38 +118,64 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, chatUploadLimitMessage)
 		return
 	}
+	for _, hdr := range files {
+		if n := filepath.Base(hdr.Filename); len(n) > maxUploadNameBytes || strings.IndexByte(n, 0) >= 0 {
+			writeErr(w, 400, "nombre de archivo demasiado largo o no valido")
+			return
+		}
+	}
 	out := make([]chatAttachment, 0, len(files))
 	for _, hdr := range files {
 		name := filepath.Base(hdr.Filename) // strip any path component
 		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 			continue
 		}
-		dest := uniqueUploadPath(dir, name)
-		if err := saveUpload(hdr, dest); err != nil {
-			writeErr(w, 500, "Save failed: "+err.Error())
+		f, dest, err := createUpload(dir, name)
+		if err != nil {
+			writeErr(w, 500, "Save failed: "+publicErr(err))
+			return
+		}
+		if err := copyUpload(f, hdr); err != nil {
+			os.Remove(dest)
+			writeErr(w, 500, "Save failed: "+publicErr(err))
 			return
 		}
 		base := filepath.Base(dest)
-		out = append(out, chatAttachment{Name: base, Path: "uploads/" + base, Size: hdr.Size, Abs: dest})
+		att := chatAttachment{Name: base, Path: "uploads/" + base, Size: hdr.Size}
+		if sub == "drafts" { // only pre-task staging reads the absolute path (see chatAttachment.Abs)
+			att.Abs = dest
+		}
+		out = append(out, att)
 	}
 	writeJSON(w, 200, map[string]any{"attachments": out})
 }
 
-// uniqueUploadPath returns dir/name, or dir/name-1, dir/name-2… when it already exists,
-// so re-uploading the same filename never clobbers a prior attachment.
-func uniqueUploadPath(dir, name string) string {
-	dest := filepath.Join(dir, name)
-	if _, err := os.Stat(dest); os.IsNotExist(err) {
-		return dest
-	}
+// maxUploadNameBytes keeps a name plus its "-N" suffix under the 255-byte limit of common file systems.
+const maxUploadNameBytes = 200
+
+// maxUniqueUploadTries bounds the "-N" suffix search in createUpload.
+const maxUniqueUploadTries = 1000
+
+// createUpload creates a new attachment file in dir: name, or name-1, name-2... when taken.
+// Creation is exclusive, so two simultaneous uploads of one name never share a file.
+func createUpload(dir, name string) (*os.File, string, error) {
 	ext := filepath.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
-	for i := 1; ; i++ {
-		cand := filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, i, ext))
-		if _, err := os.Stat(cand); os.IsNotExist(err) {
-			return cand
+	for i := 0; i < maxUniqueUploadTries; i++ {
+		cand := filepath.Join(dir, name)
+		if i > 0 {
+			cand = filepath.Join(dir, fmt.Sprintf("%s-%d%s", stem, i, ext))
 		}
+		f, err := os.OpenFile(cand, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil { // e.g. name too long or NUL byte: retrying cannot help
+			return nil, "", err
+		}
+		return f, cand, nil
 	}
+	return nil, "", fmt.Errorf("demasiados archivos con el nombre %q", name)
 }
 
 // composeAgentMessage appends an attachment manifest to the user's message so the agent
@@ -163,7 +190,12 @@ func composeAgentMessage(msg string, atts []chatAttachment, baseDir string) stri
 	b.WriteString(msg)
 	b.WriteString("\n\n[User-uploaded attachments] (absolute paths; use Read/Bash to view them):")
 	for _, a := range atts {
-		fmt.Fprintf(&b, "\n- %s (%s)", filepath.Join(baseDir, a.Path), humanBytes(a.Size))
+		abs, ok := attachmentAbs(baseDir, a.Path)
+		if !ok {
+			log.Printf("chat: attachment path outside uploads dropped: %q", a.Path)
+			continue
+		}
+		fmt.Fprintf(&b, "\n- %s (%s)", abs, humanBytes(a.Size))
 	}
 	return b.String()
 }
@@ -178,6 +210,17 @@ func userActivityWithAttachments(worker, text string, atts []chatAttachment) db.
 		a.Detail = string(blob)
 	}
 	return a
+}
+
+// attachmentAbs maps an attachment path sent by the client to an absolute path. Only
+// "uploads/<name>" with a plain file name qualifies: ".." or an absolute path would let
+// the agent read files outside the session.
+func attachmentAbs(baseDir, rel string) (string, bool) {
+	name := filepath.Base(rel)
+	if name == "." || name == ".." || rel != "uploads/"+name {
+		return "", false
+	}
+	return filepath.Join(baseDir, "uploads", name), true
 }
 
 func humanBytes(n int64) string {

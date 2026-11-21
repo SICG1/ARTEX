@@ -73,7 +73,7 @@ export function ChangePasswordDialog({
             <DialogTitle>{t("Change password")}</DialogTitle>
             <DialogDescription>
               {descBefore}
-              <b>ARTEX</b>
+              <b>Security Testing Center</b>
               {descAfter}
             </DialogDescription>
           </DialogHeader>
@@ -125,3 +125,4 @@ export function ChangePasswordDialog({
     </Dialog>
   );
 }
+

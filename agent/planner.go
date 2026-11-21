@@ -337,17 +337,20 @@ func intentSummary(ts *db.ExplorationStore, id int64) string {
 // workerOutput returns the finished worker's conclusion for an intent — the last
 // 'result' (else 'text') activity's full detail, truncated. Same source get_worker_output uses.
 func workerOutput(ts *db.ExplorationStore, id int64) string {
-	acts, _, err := ts.ActivityList(&id, 0, 1000)
+	var pick *db.Activity
+	err := eachActivityPage(func(since int64, limit int) ([]db.Activity, int64, error) {
+		return ts.ActivityList(&id, since, limit)
+	}, func(acts []db.Activity) {
+		for i := range acts {
+			if acts[i].Kind == "result" {
+				pick = &acts[i]
+			} else if acts[i].Kind == "text" && pick == nil {
+				pick = &acts[i]
+			}
+		}
+	})
 	if err != nil {
 		return "(failed to fetch output)"
-	}
-	var pick *db.Activity
-	for i := range acts {
-		if acts[i].Kind == "result" {
-			pick = &acts[i]
-		} else if acts[i].Kind == "text" && pick == nil {
-			pick = &acts[i]
-		}
 	}
 	if pick == nil {
 		return "(this work has no output yet)"

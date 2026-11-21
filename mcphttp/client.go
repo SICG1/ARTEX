@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -216,6 +217,12 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
 	streamCtx, cancel := context.WithCancel(context.Background())
+	// The stream outlives this call, but the handshake (endpoint event and initialize) is
+	// bounded: a server that accepts the connection and then stays silent must not block the caller.
+	handshake := time.AfterFunc(30*time.Second, cancel)
+	defer handshake.Stop()
+	stopCallerCancel := context.AfterFunc(ctx, cancel)
+	defer stopCallerCancel()
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		cancel()
@@ -382,13 +389,19 @@ func (c *Client) Tools(ctx context.Context) ([]actool.CoreTool, error) {
 		return nil, err
 	}
 	var res struct {
-		Tools []remoteTool `json:"tools"`
+		Tools []json.RawMessage `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return nil, err
 	}
 	out := make([]actool.CoreTool, 0, len(res.Tools))
-	for _, rt := range res.Tools {
+	for i, item := range res.Tools {
+		var rt remoteTool
+		// One malformed tool must not hide the server's other tools: skip it and say so.
+		if err := json.Unmarshal(item, &rt); err != nil {
+			log.Printf("[mcphttp] %s: skipping tool %d, malformed: %v", c.server, i, err)
+			continue
+		}
 		out = append(out, c.wrap(rt))
 	}
 	return out, nil
@@ -663,6 +676,15 @@ func (c *Client) legacyRoundTrip(ctx context.Context, body rpcRequest, expectRes
 		return response, nil
 	case err := <-c.streamErr:
 		return nil, fmt.Errorf("mcp sse stream: %w", err)
+	case <-c.streamDone:
+		// The stream is gone: every waiting call must learn it, not only the first one.
+		// A response delivered just before the close still wins.
+		select {
+		case response := <-responseCh:
+			return response, nil
+		default:
+		}
+		return nil, errors.New("mcp sse stream closed before the response arrived")
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

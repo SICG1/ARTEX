@@ -66,3 +66,9 @@ posture-runs/
 
 # benchmark runner output (one dir per run)
 benchmark-results/
+
+# local runtime artifacts: database dumps, logs, pre-upgrade binaries
+/backups/
+/artex.log
+/artex.bak*
+/artex.v*

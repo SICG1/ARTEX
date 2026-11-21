@@ -196,6 +196,42 @@ func signJWTVersion(key []byte, version int64) (string, error) {
 	}).SignedString(key)
 }
 
+// Roles de acceso. El token de admin puede escribir; el de viewer solo leer.
+const (
+	RoleAdmin  = "admin"
+	RoleViewer = "viewer"
+)
+
+// signJWTFor firma un token con el rol indicado (viewer: solo lectura).
+func signJWTFor(key []byte, role string) (string, error) {
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"sub":  "ARTEX",
+		"role": role,
+		"exp":  time.Now().Add(jwtTTL).Unix(),
+		"iat":  time.Now().Unix(),
+	}).SignedString(key)
+}
+
+// roleFromToken devuelve el rol embebido en el token. Los tokens antiguos sin
+// claim de rol se consideran admin (compatibilidad hacia atras).
+func roleFromToken(tokenStr string, key []byte) string {
+	t, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method")
+		}
+		return key, nil
+	})
+	if err != nil || !t.Valid {
+		return ""
+	}
+	if claims, ok := t.Claims.(jwt.MapClaims); ok {
+		if r, ok := claims["role"].(string); ok && r != "" {
+			return r
+		}
+	}
+	return RoleAdmin
+}
+
 // verifyJWT returns true when tokenStr is a valid, non-expired HS256 token.
 // version 0 means no password change is stored yet, and any valid token is
 // accepted. A later version requires the token's pwd claim to equal it.
@@ -348,6 +384,14 @@ func (s *Server) requireAuth(h http.Handler) http.Handler {
 		if !s.sessionOK(tok) {
 			writeErr(w, 401, "token is invalid or expired")
 			return
+		}
+		// RBAC minimo: el rol viewer solo puede leer. Las escrituras exigen admin.
+		if roleFromToken(tok, s.jwtKey) == RoleViewer {
+			switch r.Method {
+			case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+				writeErr(w, 403, "read-only token: this action requires the admin role")
+				return
+			}
 		}
 		switch r.Method {
 		case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
@@ -645,7 +689,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, getSetting func(s
 		writeErr(w, 400, "Invalid request format")
 		return
 	}
-	if req.Username != "ARTEX" {
+	now, ip := time.Now(), clientIP(r, s.trustedProxies)
+	if req.Username != "ARTEX" && req.Username != "NeoSec VigIA" && req.Username != "Security Testing Center" {
+		time.Sleep(loginFailGuard.failed("", ip, now))
 		writeErr(w, 401, "Incorrect username or password")
 		return
 	}
@@ -659,10 +705,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, getSetting func(s
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)); err != nil {
+		time.Sleep(loginFailGuard.failed(req.Username, ip, now))
 		writeErr(w, 401, "Incorrect username or password")
 		return
 	}
 	s.loginLimit.reset(ip)
+	loginFailGuard.succeeded(req.Username)
 	if s.pwdState.Load() == pwdUnreadable {
 		s.loadPasswordVersion()
 	}
@@ -676,4 +724,19 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, getSetting func(s
 		return
 	}
 	writeJSON(w, 200, map[string]any{"token": tok})
+}
+
+// POST /api/auth/viewer-token — el admin emite un token de solo lectura (7 dias)
+// para monitoreo o demos sin dar permiso de escritura sobre la plataforma.
+func (s *Server) authViewerToken(w http.ResponseWriter, r *http.Request) {
+	tok, err := signJWTFor(s.jwtKey, RoleViewer)
+	if err != nil {
+		writeErr(w, 500, "could not issue token")
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"token":      tok,
+		"role":       RoleViewer,
+		"expires_in": int(jwtTTL.Seconds()),
+	})
 }

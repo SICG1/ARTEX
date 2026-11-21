@@ -62,11 +62,15 @@ func (s *Server) addConstraint(w http.ResponseWriter, r *http.Request) {
 		Text string `json:"text"`
 		Kind string `json:"kind"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&body); err != nil {
 		writeErr(w, 400, "invalid JSON")
 		return
 	}
 	text := strings.TrimSpace(body.Text)
+	if len([]rune(text)) > maxFreeTextRunes {
+		writeErr(w, 400, "El texto de la restricción no puede superar 8000 caracteres")
+		return
+	}
 	if text == "" {
 		writeErr(w, 400, "Constraint text cannot be empty")
 		return
@@ -106,11 +110,15 @@ func (s *Server) editConstraint(w http.ResponseWriter, r *http.Request) {
 		Text string `json:"text"`
 		Kind string `json:"kind"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(jsonBody(r)).Decode(&body); err != nil {
 		writeErr(w, 400, "invalid JSON")
 		return
 	}
 	text := strings.TrimSpace(body.Text)
+	if len([]rune(text)) > maxFreeTextRunes {
+		writeErr(w, 400, "El texto de la restricción no puede superar 8000 caracteres")
+		return
+	}
 	if text == "" {
 		writeErr(w, 400, "Constraint text cannot be empty")
 		return

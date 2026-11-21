@@ -91,6 +91,28 @@ func workspaceHoldsDenied(realRoot, path string) bool {
 	return false
 }
 
+// wsRealPath resolves symlinks in abs. A path that does not exist yet resolves through its
+// nearest existing parent, so a new file cannot be created through a link either.
+func wsRealPath(abs string) (string, error) {
+	cur, rest := abs, ""
+	for {
+		_, err := os.Lstat(cur)
+		if err == nil {
+			resolved, err := filepath.EvalSymlinks(cur) // a dangling link fails here
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(resolved, rest), nil
+		}
+		parent := filepath.Dir(cur)
+		if !os.IsNotExist(err) || parent == cur {
+			return "", err
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
 // wsRel renders an absolute path back as a workspace-relative path (forward slashes).
 func (s *Server) wsRel(abs string) string {
 	base, err := resolveRealRoot(s.m.dir)
@@ -340,17 +362,26 @@ func (s *Server) wsUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func saveUpload(hdr *multipart.FileHeader, dest string) error {
-	src, err := hdr.Open()
-	if err != nil {
-		return err
-	}
-	defer src.Close()
 	out, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, src)
+	return copyUpload(out, hdr)
+}
+
+// copyUpload writes the uploaded file into f and closes f. A failed close (a full disk, for
+// example) is returned, so a file cut short never reports success.
+func copyUpload(f *os.File, hdr *multipart.FileHeader) error {
+	src, err := hdr.Open()
+	if err != nil {
+		f.Close()
+		return err
+	}
+	defer src.Close()
+	_, err = io.Copy(f, src)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
 	return err
 }
 

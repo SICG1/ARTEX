@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -510,7 +511,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// derived_from — possibly several facts combined) and its yields (the
 	// facts/findings it produced). factFrom maps a fact → the intent that
 	// produced it. This is the relationship layer the flat lists lacked.
-	edges, _ := t.ts.Edges(5000)
+	edges, _ := t.ts.Edges(1 << 30) // all edges: a capped read without ORDER BY returns an arbitrary subset
 	parentsOf := map[int64][]int64{}
 	yieldsOf := map[int64][]int64{}
 	factFrom := map[int64]int64{}
@@ -534,10 +535,15 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// — hidden() only folds a member out when it is covered AND still cold. Computed
 	// every round (cheap for real graph sizes); nil map degrades safely.
 	var hotAtRender map[int64]bool
+	coldOK := false
 	if cg, _, err := loadColdGraph(t.ts); err == nil {
 		hotAtRender = cg.hotSet()
+		coldOK = true
+	} else {
+		// Without the graph nobody can tell a revived member: show the covered ones instead of hiding them.
+		log.Printf("[tools] cold graph unavailable, showing covered members: %v", err)
 	}
-	hidden := func(id int64) bool { _, c := covered[id]; return c && !hotAtRender[id] }
+	hidden := func(id int64) bool { _, c := covered[id]; return coldOK && c && !hotAtRender[id] }
 	const openIntentsCap = 30
 	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC — the top N by priority; the real total is in frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
@@ -553,6 +559,25 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 			}
 			recentDone = append(recentDone, n) // newest first (all is id-DESC); folded ones are dropped, output truncated to the latest N
 		}
+	}
+	// Running intents are read from every page: an old one must not vanish from the summary,
+	// or the planner could dispatch its work again.
+	running = nil
+	for before := int64(0); ; {
+		page, more, err := t.ts.ListByKindPage(db.KindIntent, before, 300)
+		if err != nil {
+			log.Printf("[tools] graph_overview: reading running intents stopped early: %v", err)
+			break
+		}
+		for _, n := range page {
+			if n.State == "running" {
+				running = append(running, n)
+			}
+		}
+		if !more || len(page) == 0 {
+			break
+		}
+		before = page[len(page)-1].ID
 	}
 	out["running_intents"] = compactIntents(running, parentsOf, yieldsOf)
 	// done_intents_total: the total number of finished intents (done/blocked/exhausted),
@@ -854,7 +879,7 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		}
 		stats, statsErr := ts.Stats()
 
-		edges, _ := ts.Edges(5000)
+		edges, _ := ts.Edges(1 << 30) // all edges, as loadColdGraph reads them
 		parentsOf := map[int64][]int64{}
 		yieldsOf := map[int64][]int64{}
 		factFrom := map[int64]int64{}
@@ -1111,7 +1136,10 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 	return t.readExpTool("list_findings", "List the [confirmed findings] of this task and directly related tasks (compact: id+task_id+intent_id+vulnclass+severity+summary+state+status). Related-task entries carry source_task_id/inherited=true and are read-only. Only findings here; for ordinary exploration facts use list_facts, for details node_detail(id).",
 		obj(map[string]any{}),
 		func(context.Context, json.RawMessage) (actool.Result, error) {
-			f, _ := t.ts.ListByKindWithSources(db.KindFinding, 500)
+			f, err := t.ts.ListByKindWithSources(db.KindFinding, 500)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
 			if err := t.ts.PopulateFindingTrafficIDs(f); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -1222,6 +1250,11 @@ func (t *ToolSet) nodeDetail() actool.CoreTool {
 			if err := t.ts.PopulateFindingTrafficIDs([]*db.Node{n}); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			full, _ := json.Marshal(n)
+			if len(full) > 256<<10 {
+				// Bounded: the model gets the start of the record and a marker, not an unbounded blob.
+				return actool.Text(strings.ToValidUTF8(string(full[:256<<10]), "") + "\n[truncated: node_detail limit of 256 KiB reached]"), nil
+			}
 			return jsonResult(n) // full payload incl. detail / evidence, plus explicit finding IDs
 		})
 }
@@ -1289,7 +1322,9 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	// upstream lineage: link each (validated) fact/finding parent → this intent, so
 	// "multiple facts combine into one new intent" is expressible.
 	for _, parent := range parents {
-		_ = t.ts.Link(parent, db.RelDerivedFrom, id)
+		if err := t.ts.Link(parent, db.RelDerivedFrom, id); err != nil {
+			log.Printf("[tools] lineage link %d -> intent %d: %v", parent, id, err)
+		}
 	}
 	// a top-level intent (no explicit parent) connects to the origin fact, so every
 	// intent still traces back to a fact node — at task start the only fact is the
@@ -1322,6 +1357,9 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 			items := a.Intents
 			if !batch {
 				items = []intentItem{a.intentItem}
+			}
+			if len(items) > 50 {
+				return actool.Errorf("too many intents in one call: at most 50"), nil
 			}
 
 			ids := make([]int64, len(items))
@@ -1442,6 +1480,12 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			}
 			_ = t.ts.Link(ev, db.RelProves, goal)
 			_ = t.ts.SetNodeState(goal, "met")
+			if err := t.ts.Link(ev, db.RelProves, goal); err != nil {
+				return actool.Errorf("could not record the proof link: " + err.Error()), nil
+			}
+			if err := t.ts.SetNodeState(goal, "met"); err != nil {
+				return actool.Errorf("could not mark the goal as met: " + err.Error()), nil
+			}
 			// Each time a goal is marked met, check whether [all goals] of this task are
 			// met; if so, automatically judge the task complete (set GoalMet) — no need to
 			// rely on the model explicitly calling goal_met.
@@ -2107,23 +2151,11 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 			if intentNode == nil || intentNode.Kind != db.KindIntent {
 				return actool.Errorf("intent_id does not belong to this task or its directly related tasks"), nil
 			}
-			acts, _, err := t.ts.ActivityListWithSources(id, 0, 1000)
+			pick, err := lastWorkerOutput(func(since int64, limit int) ([]db.Activity, int64, error) {
+				return t.ts.ActivityListWithSources(id, since, limit)
+			})
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
-			}
-			var chosen, fallback *db.Activity
-			for i := range acts {
-				switch acts[i].Kind {
-				case "result":
-					chosen = &acts[i]
-					fallback = &acts[i]
-				case "text":
-					fallback = &acts[i]
-				}
-			}
-			pick := chosen
-			if pick == nil {
-				pick = fallback
 			}
 			if pick == nil {
 				if intentNode.Inherited {
@@ -2296,6 +2328,9 @@ func (t *ToolSet) searchAllWorkerTraces() actool.CoreTool {
 			if strings.TrimSpace(a.Q) == "" {
 				return actool.Errorf("q is required"), nil
 			}
+			if a.Limit > 200 {
+				a.Limit = 200 // bounded: the model chooses this value
+			}
 			// Exclude the caller's own intent's steps (a worker's own trace is already in its context).
 			acts, err := t.ts.ActivityTraceSearchAllWithSources(t.ownerNode, a.Q, a.Limit)
 			if err != nil {
@@ -2346,12 +2381,15 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 			if limit <= 0 {
 				limit = 50
 			}
+			if limit > 200 {
+				limit = 200 // bounded: the model chooses this value
+			}
 			all, err := t.ts.ListByKindWithSources(db.KindIntent, 500)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
 			q := strings.ToLower(strings.TrimSpace(a.Q))
-			out := make([]map[string]any, 0, limit)
+			out := []map[string]any{}
 			for _, n := range all {
 				if n.Inherited && n.State == "running" {
 					continue

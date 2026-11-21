@@ -5,6 +5,7 @@ import * as React from "react";
 import { CpuIcon, FlaskConicalIcon, KeyboardIcon, RadioTowerIcon, SearchIcon, ShieldAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 
+import { LanguageCard } from "@/components/i18n/language-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -302,6 +303,7 @@ export default function SystemSettingsPage() {
           balance-fill by content height. Card spacing uses mb rather than gap — in a multi-column layout
           column-gap only covers the gaps between columns; row spacing must come from the children. */}
       <div className="columns-1 gap-4 md:gap-6 lg:columns-2">
+        <LanguageCard />
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">

@@ -104,8 +104,18 @@ func (s *AssetStore) DeleteTaskInterceptRule(taskID, ruleID int64) (bool, error)
 
 // ToggleTaskInterceptRule flips the enabled state of a task's rule.
 func (s *AssetStore) ToggleTaskInterceptRule(taskID, ruleID int64, enabled bool) error {
-	_, err := s.db.Exec(`UPDATE task_intercept_rules SET enabled=$3 WHERE id=$1 AND task_id=$2`, ruleID, taskID, enabled)
-	return err
+	res, err := s.db.Exec(`UPDATE task_intercept_rules SET enabled=$3 WHERE id=$1 AND task_id=$2`, ruleID, taskID, enabled)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 { // no such rule in this task: report it as not found, not as success
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // insertTaskInterceptRules inserts task-level rules within the task-creation

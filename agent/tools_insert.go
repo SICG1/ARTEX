@@ -344,11 +344,15 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					}
 
 				case "endpoint":
+					epIP := item.ServiceIP
+					if epIP == "" {
+						epIP = item.IP
+					}
 					id, err = t.as.UpsertEndpoint(db.UpsertEndpointReq{
 						URL:    item.URL,
 						Method: item.Method,
 						Params: item.Params,
-						IP:     item.ServiceIP,
+						IP:     epIP,
 						TaskID: taskID,
 					})
 
@@ -598,6 +602,9 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			_ = json.Unmarshal(in, &a)
 			if a.Limit <= 0 {
 				a.Limit = 10
+			}
+			if a.Limit > 200 {
+				a.Limit = 200 // bounded: the model chooses this value
 			}
 
 			var assets []*db.Asset
